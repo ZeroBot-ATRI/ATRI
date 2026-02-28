@@ -41,6 +41,8 @@ class Bot:
         self.multimodal = config["llm"].get("multimodal", False)
         self.group_whitelist = [str(g) for g in config.get("group_whitelist", [])]
 
+        self._echo_counter = 0
+
         self.parser = MessageParser(db, vision_pipeline, self.multimodal, self.bot_qq)
         self.assembler = ContextAssembler(
             config.get("system_prompt", ""), self.multimodal
@@ -100,10 +102,6 @@ class Bot:
 
         # 自身消息拦截（最高优先级，防死循环）
         if user_id == self.bot_qq:
-            await self.db.buffer_message(
-                message_id, group_id, user_id, "assistant", content, embedding_vec,
-                user_name="[机器人]",
-            )
             return
 
         # 写入热存储缓冲区
@@ -152,10 +150,17 @@ class Bot:
             await self._send_group(ws, group_id, "我脑袋有点宕机，稍微歇一下再问我吧")
             return
 
-        # 输出净化 + 发送
+        # 输出净化 + 发送 + 主动存储机器人回复
         if reply:
             reply = sanitize_output(reply)
-            await self._send_group(ws, group_id, reply)
+            sent_msg_id = await self._send_group(ws, group_id, reply)
+            bot_embedding = None
+            if len(reply.strip()) >= 5:
+                bot_embedding = await self.embedding.get_embedding(reply)
+            await self.db.buffer_message(
+                sent_msg_id, group_id, self.bot_qq, "assistant", reply, bot_embedding,
+                user_name="[机器人]",
+            )
 
     def _should_reply(self, parsed: dict, content: str) -> bool:
         """判断是否需要触发 LLM 回复"""
@@ -219,8 +224,8 @@ class Bot:
 
         return f"未知工具: {name}"
 
-    async def _send_group(self, ws, group_id: str, text: str):
-        """发送群聊消息"""
+    async def _send_group(self, ws, group_id: str, text: str) -> str:
+        """发送群聊消息，直接读 WebSocket 等待 echo 响应获取 message_id"""
         message = text
         images = getattr(self, "_pending_images", [])
         if images:
@@ -228,8 +233,12 @@ class Bot:
                 message += f"\n[CQ:image,file=base64://{b64}]"
             self._pending_images = []
 
+        self._echo_counter += 1
+        echo = f"send_{self._echo_counter}"
+
         payload = {
             "action": "send_group_msg",
+            "echo": echo,
             "params": {
                 "group_id": int(group_id),
                 "message": message,
@@ -237,3 +246,18 @@ class Bot:
         }
         await ws.send(json.dumps(payload))
         logger.info(f"已发送回复到群 {group_id}")
+
+        # 直接读 WebSocket 等待 echo 响应，其他消息异步分发
+        deadline = asyncio.get_event_loop().time() + 5
+        try:
+            while asyncio.get_event_loop().time() < deadline:
+                remaining = deadline - asyncio.get_event_loop().time()
+                raw = await asyncio.wait_for(ws.recv(), timeout=max(remaining, 0.1))
+                data = json.loads(raw)
+                if data.get("echo") == echo:
+                    return str(data.get("data", {}).get("message_id", ""))
+                # 非 echo 响应的消息异步分发，不阻塞当前等待
+                asyncio.create_task(self._dispatch(data, ws))
+        except asyncio.TimeoutError:
+            logger.warning(f"发送响应超时，echo={echo}")
+        return ""

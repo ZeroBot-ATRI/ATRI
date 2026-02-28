@@ -1,6 +1,10 @@
 import logging
 import asyncio
+import os
 from functools import partial
+
+# os.environ["HF_HUB_OFFLINE"] = "1"  # 阻断 HuggingFace 联网请求，强制使用本地缓存模型。第一次使用先注释掉这些。
+# os.environ["TRANSFORMERS_OFFLINE"] = "1"
 from sentence_transformers import SentenceTransformer
 
 logger = logging.getLogger("atri.embedding")
@@ -16,7 +20,7 @@ class EmbeddingModel:
 
     def load(self):
         logger.info(f"正在加载 Embedding 模型: {self.model_name} -> {self.device}")
-        self.model = SentenceTransformer(self.model_name, device=self.device)
+        self.model = SentenceTransformer(self.model_name, device=self.device)#本地加载模型, local_files_only=True
         logger.info("Embedding 模型加载完成")
 
     def _encode_sync(self, text: str) -> list[float]:
