@@ -5,7 +5,7 @@ from core.llm_logger import save_simple_chat, save_tool_chat
 
 logger = logging.getLogger("atri.agent.llm")
 
-TIMEOUT = 15  # API 超时秒数
+TIMEOUT = 30  # API 超时秒数
 
 
 class LLMClient:

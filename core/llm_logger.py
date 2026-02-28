@@ -36,18 +36,27 @@ def save_simple_chat(payload: dict, response: dict):
 def save_tool_chat(rounds: list):
     """
     记录 chat_with_tools 的完整多轮交互
-
-    rounds 结构: [
-        {"request": payload_dict, "response": response_dict},
-        ...
-    ]
+    tools 定义提取到顶层，每轮 request 中不再重复
     """
     _ensure_dir()
+    tools = None
+    clean_rounds = []
+    for r in rounds:
+        cr = dict(r)
+        req = dict(cr.get("request", {}))
+        if tools is None:
+            tools = req.pop("tools", None)
+        else:
+            req.pop("tools", None)
+        cr["request"] = req
+        clean_rounds.append(cr)
+
     record = {
         "type": "chat_with_tools",
         "timestamp": datetime.now().isoformat(),
-        "total_rounds": len(rounds),
-        "rounds": rounds,
+        "total_rounds": len(clean_rounds),
+        "tools": tools,
+        "rounds": clean_rounds,
     }
     path = _make_path("tools")
     with open(path, "w", encoding="utf-8") as f:
