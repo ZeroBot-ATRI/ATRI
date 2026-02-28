@@ -1,6 +1,7 @@
 import logging
 import json
 import httpx
+from core.llm_logger import save_simple_chat, save_tool_chat
 
 logger = logging.getLogger("atri.agent.llm")
 
@@ -35,6 +36,7 @@ class LLMClient:
             )
             resp.raise_for_status()
             data = resp.json()
+        save_simple_chat(payload, data)
         return data["choices"][0]["message"]["content"].strip()
 
     async def chat_with_tools(self, messages: list, tools: list,
@@ -46,44 +48,61 @@ class LLMClient:
         """
         max_rounds = 7
         current_messages = list(messages)
+        log_rounds = []
 
-        async with httpx.AsyncClient(timeout=TIMEOUT) as client:
-            for _ in range(max_rounds):
-                payload = {
-                    "model": self.model,
-                    "messages": current_messages,
-                    "tools": tools,
-                    "max_tokens": 1500,
-                }
-                resp = await client.post(
-                    f"{self.api_base}/chat/completions",
-                    headers=self.headers,
-                    json=payload,
-                )
-                resp.raise_for_status()
-                data = resp.json()
+        try:
+            async with httpx.AsyncClient(timeout=TIMEOUT) as client:
+                for _ in range(max_rounds):
+                    payload = {
+                        "model": self.model,
+                        "messages": list(current_messages),
+                        "tools": tools,
+                        "max_tokens": 1500,
+                    }
+                    resp = await client.post(
+                        f"{self.api_base}/chat/completions",
+                        headers=self.headers,
+                        json=payload,
+                    )
+                    resp.raise_for_status()
+                    data = resp.json()
 
-                choice = data["choices"][0]
-                msg = choice["message"]
-                current_messages.append(msg)
+                    round_log = {"request": payload, "response": data}
 
-                # 无工具调用，返回文本
-                if not msg.get("tool_calls"):
-                    return msg.get("content", "").strip()
+                    choice = data["choices"][0]
+                    msg = choice["message"]
+                    current_messages.append(msg)
 
-                # 执行工具调用
-                for tc in msg["tool_calls"]:
-                    fn_name = tc["function"]["name"]
-                    fn_args = json.loads(tc["function"]["arguments"])
-                    logger.info(f"工具调用: {fn_name}({fn_args})")
+                    # 无工具调用，返回文本
+                    if not msg.get("tool_calls"):
+                        log_rounds.append(round_log)
+                        return msg.get("content", "").strip()
 
-                    result = await tool_executor(fn_name, fn_args)
+                    # 执行工具调用
+                    tool_results = []
+                    for tc in msg["tool_calls"]:
+                        fn_name = tc["function"]["name"]
+                        fn_args = json.loads(tc["function"]["arguments"])
+                        logger.info(f"工具调用: {fn_name}({fn_args})")
 
-                    current_messages.append({
-                        "role": "tool",
-                        "tool_call_id": tc["id"],
-                        "content": str(result),
-                    })
+                        result = await tool_executor(fn_name, fn_args)
+                        tool_results.append({
+                            "tool_call_id": tc["id"],
+                            "name": fn_name,
+                            "arguments": fn_args,
+                            "result": str(result),
+                        })
 
-        # 超过最大轮次，取最后一条文本
-        return msg.get("content", "思考了太久，脑子转不动了...")
+                        current_messages.append({
+                            "role": "tool",
+                            "tool_call_id": tc["id"],
+                            "content": str(result),
+                        })
+
+                    round_log["tool_results"] = tool_results
+                    log_rounds.append(round_log)
+
+            # 超过最大轮次，取最后一条文本
+            return msg.get("content", "思考了太久，脑子转不动了...")
+        finally:
+            save_tool_chat(log_rounds)

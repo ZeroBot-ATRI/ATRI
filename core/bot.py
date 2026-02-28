@@ -2,6 +2,7 @@ import logging
 import json
 import random
 import asyncio
+import time
 import websockets
 
 from core.message_parser import MessageParser
@@ -42,6 +43,7 @@ class Bot:
         self.group_whitelist = [str(g) for g in config.get("group_whitelist", [])]
 
         self._echo_counter = 0
+        self._last_random_reply = 0.0
 
         self.parser = MessageParser(db, vision_pipeline, self.multimodal, self.bot_qq)
         self.assembler = ContextAssembler(
@@ -177,8 +179,9 @@ class Bot:
         for word in self.wake_words:
             if word and word.lower() in content_for_wake.lower():
                 return True
-        # 0.2% 概率随机插嘴
-        if random.random() < 0.002:
+        # 1% 概率随机插嘴，两次间隔不低于 180 秒
+        if random.random() < 0.01 and time.time() - self._last_random_reply >= 180:
+            self._last_random_reply = time.time()
             return True
         return False
 

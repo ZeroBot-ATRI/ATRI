@@ -216,3 +216,4 @@ test_*.py
 ATRI.code-workspace
 技术架构与实现说明书：AI-Agent QQ Bot.md
 CLAUDE.md
+logs/
