@@ -19,7 +19,7 @@ class LLMAdapter(Protocol):
 class OpenAIAdapter:
     """OpenAI 兼容格式（DeepSeek/GPT/Claude 等）"""
 
-    def __init__(self, client, max_rounds=7):
+    def __init__(self, client, max_rounds=3):
         self.client = client
         self.max_rounds = max_rounds
 
@@ -41,11 +41,19 @@ class OpenAIAdapter:
 
                 choice = data["choices"][0]
                 msg = choice["message"]
+                content = msg.get("content", "")
+
+                # 检测并清理 XML 格式的工具调用（防止 LLM 输出错误格式）
+                if "<tool_call>" in content:
+                    logger.warning(f"检测到 XML 格式工具调用，已清理: {content[:100]}")
+                    content = re.sub(r'<tool_call>.*?</tool_call>', '', content, flags=re.DOTALL).strip()
+                    msg["content"] = content
+
                 current_messages.append(msg)
 
                 if not msg.get("tool_calls"):
                     log_rounds.append(round_log)
-                    return (msg.get("content") or "").strip()
+                    return content or ""
 
                 tool_results = []
                 for tc in msg["tool_calls"]:
