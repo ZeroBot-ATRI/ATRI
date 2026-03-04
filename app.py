@@ -59,9 +59,9 @@ async def main():
     llm = LLMClient(config["llm"])
     logger.info(f"LLM 客户端就绪: {config['llm']['model']}")
 
-    # 5. 工具注册（图像相关工具已禁用）
-    from agent.tools import ToolRegistry
-    tools = ToolRegistry(multimodal=True)  # 不注册 run_vision
+    # 5. MCP 工具服务器
+    from agent.mcp_tools import create_mcp_server
+    mcp_server = create_mcp_server(db, embedding, config)
 
     # 6. 人设管理
     from memory.persona import PersonaManager
@@ -70,7 +70,7 @@ async def main():
     # 7. 启动 Bot
     from core.bot import Bot
     bot = Bot(
-        config, db, embedding, llm, tools,
+        config, db, embedding, llm, mcp_server,
         persona, vision_pipeline,
     )
 

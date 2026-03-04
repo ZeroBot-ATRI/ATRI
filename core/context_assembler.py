@@ -43,7 +43,7 @@ class ContextAssembler:
         for msg in reversed(recent_messages):
             role = msg["role"]
             if role == "assistant":
-                role_tag = msg.get("user_name") or "[机器人]"
+                role_tag = msg.get("user_name") or "我"
             else:
                 name = (msg.get("user_name") or "").strip()
                 role_tag = f"{name}(QQ:{msg['user_id']})" if name else f"QQ:{msg['user_id']}"
@@ -66,16 +66,16 @@ class ContextAssembler:
 
         messages = [{"role": "system", "content": system_text}]
 
-        # 4. 用户输入 [图像-暂时禁用] 不再传图片 URL
-        # if self.multimodal and image_urls:
-        #     content_parts = [{"type": "text", "text": f"<user_input>{user_content}</user_input>"}]
-        #     for url in image_urls:
-        #         content_parts.append({"type": "image_url", "image_url": {"url": url}})
-        #     messages.append({"role": "user", "content": content_parts})
-        # else:
-        messages.append({
-            "role": "user",
-            "content": f"<user_input>{user_content}</user_input>"
-        })
+        # 4. 用户输入（多模态时附加图片）
+        if self.multimodal and image_urls:
+            content_parts = [{"type": "text", "text": f"<user_input>{user_content}</user_input>"}]
+            for url in image_urls:
+                content_parts.append({"type": "image_url", "image_url": {"url": url}})
+            messages.append({"role": "user", "content": content_parts})
+        else:
+            messages.append({
+                "role": "user",
+                "content": f"<user_input>{user_content}</user_input>"
+            })
 
         return messages

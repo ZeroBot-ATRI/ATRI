@@ -1,15 +1,18 @@
 import logging
 import json
+import asyncio
 import httpx
+from openai import OpenAI
 from core.llm_logger import save_simple_chat, save_tool_chat
+from agent.llm_adapter import OpenAIAdapter, NativeAdapter, QwenAdapter
 
 logger = logging.getLogger("atri.agent.llm")
 
-TIMEOUT = 30  # API 超时秒数
+TIMEOUT = 60  # API 超时秒数（思考模型需要更长时间）
 
 
 class LLMClient:
-    """OpenAI 兼容 LLM 客户端，支持 Function Calling 多轮循环"""
+    """OpenAI 兼容 LLM 客户端，支持 MCP 工具调用"""
 
     def __init__(self, config: dict):
         self.api_base = config["api_base"].rstrip("/")
@@ -21,88 +24,75 @@ class LLMClient:
             "Content-Type": "application/json",
         }
 
-    async def simple_chat(self, prompt: str) -> str:
-        """简单对话（无工具），用于人设总结等内部任务"""
-        payload = {
-            "model": self.model,
-            "messages": [{"role": "user", "content": prompt}],
-            "max_tokens": 500,
-        }
-        async with httpx.AsyncClient(timeout=TIMEOUT) as client:
-            resp = await client.post(
-                f"{self.api_base}/chat/completions",
-                headers=self.headers,
-                json=payload,
+        # OpenAI SDK 客户端（用于 simple_chat，使用同步版本）
+        self.openai_client = OpenAI(
+            base_url=self.api_base,
+            api_key=self.api_key,
+            timeout=120.0
+        )
+
+        # 根据配置选择适配器
+        adapter_type = config.get("adapter", "openai")
+        if adapter_type == "qwen":
+            self.adapter = QwenAdapter(self)
+        elif adapter_type == "native":
+            self.adapter = NativeAdapter(self)
+        else:
+            self.adapter = OpenAIAdapter(self)
+
+    async def _post(self, endpoint: str, payload: dict):
+        """统一 HTTP POST 请求"""
+        return await self._post_with_timeout(endpoint, payload, TIMEOUT)
+
+    async def _post_with_timeout(self, endpoint: str, payload: dict, timeout: int):
+        """统一 HTTP POST 请求（可自定义超时）"""
+        for attempt in range(3):
+            try:
+                async with httpx.AsyncClient(timeout=timeout) as client:
+                    resp = await client.post(
+                        f"{self.api_base}{endpoint}",
+                        headers=self.headers,
+                        json=payload,
+                    )
+                    if resp.status_code != 200:
+                        logger.error(f"LLM API 返回 {resp.status_code}: {resp.text}")
+                        resp.raise_for_status()
+                    return resp
+            except (httpx.RemoteProtocolError, httpx.ReadError) as e:
+                logger.warning(f"连接断开 (尝试 {attempt+1}/3): {e}")
+                if attempt == 2:
+                    raise
+                await asyncio.sleep(2 ** attempt)
+
+    async def simple_chat(self, prompt: str, disable_thinking: bool = False, timeout: int = None) -> str:
+        """简单对话（无工具），使用同步 OpenAI SDK + asyncio.to_thread"""
+        def _sync_call():
+            response = self.openai_client.chat.completions.create(
+                model=self.model,
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=16384,
+                temperature=1.0,
+                stream=True
             )
-            resp.raise_for_status()
-            data = resp.json()
-        save_simple_chat(payload, data)
-        return data["choices"][0]["message"]["content"].strip()
+            # 收集流式响应
+            content = ""
+            for chunk in response:
+                if chunk.choices and chunk.choices[0].delta.content:
+                    content += chunk.choices[0].delta.content
+            return content.strip()
+
+        try:
+            content = await asyncio.to_thread(_sync_call)
+            return content
+        except Exception as e:
+            logger.error(f"OpenAI SDK 调用失败: {e}")
+            raise
 
     async def chat_with_tools(self, messages: list, tools: list,
                               tool_executor) -> str:
         """
-        带 Function Calling 的多轮对话循环
+        带工具调用的多轮对话循环（委托给适配器）
         tool_executor: async callable(name, args) -> str
         返回最终文本回复
         """
-        max_rounds = 7
-        current_messages = list(messages)
-        log_rounds = []
-
-        try:
-            async with httpx.AsyncClient(timeout=TIMEOUT) as client:
-                for _ in range(max_rounds):
-                    payload = {
-                        "model": self.model,
-                        "messages": list(current_messages),
-                        "tools": tools,
-                        "max_tokens": 1500,
-                    }
-                    resp = await client.post(
-                        f"{self.api_base}/chat/completions",
-                        headers=self.headers,
-                        json=payload,
-                    )
-                    resp.raise_for_status()
-                    data = resp.json()
-
-                    round_log = {"request": payload, "response": data}
-
-                    choice = data["choices"][0]
-                    msg = choice["message"]
-                    current_messages.append(msg)
-
-                    # 无工具调用，返回文本
-                    if not msg.get("tool_calls"):
-                        log_rounds.append(round_log)
-                        return msg.get("content", "").strip()
-
-                    # 执行工具调用
-                    tool_results = []
-                    for tc in msg["tool_calls"]:
-                        fn_name = tc["function"]["name"]
-                        fn_args = json.loads(tc["function"]["arguments"])
-                        logger.info(f"工具调用: {fn_name}({fn_args})")
-
-                        result = await tool_executor(fn_name, fn_args)
-                        tool_results.append({
-                            "tool_call_id": tc["id"],
-                            "name": fn_name,
-                            "arguments": fn_args,
-                            "result": str(result),
-                        })
-
-                        current_messages.append({
-                            "role": "tool",
-                            "tool_call_id": tc["id"],
-                            "content": str(result),
-                        })
-
-                    round_log["tool_results"] = tool_results
-                    log_rounds.append(round_log)
-
-            # 超过最大轮次，取最后一条文本
-            return msg.get("content", "思考了太久，脑子转不动了...")
-        finally:
-            save_tool_chat(log_rounds)
+        return await self.adapter.chat_with_tools(messages, tools, tool_executor)

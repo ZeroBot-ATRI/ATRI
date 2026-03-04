@@ -7,17 +7,9 @@ import websockets
 
 from core.message_parser import MessageParser
 from core.context_assembler import ContextAssembler
-from core.security import (
-    audit_sandbox_code, audit_search_query,
-    # audit_vision_url,  # [图像-暂时禁用]
-    sanitize_output,
-)
+from core.security import sanitize_output
 from core.rate_limiter import RateLimiter
 from memory.database import sanitize_user_name
-from agent.memory_search import query_chat_memory
-from agent.web_search import run_search
-from agent.sandbox import run_sandbox
-# from agent.vision import run_vision  # [图像-暂时禁用]
 
 logger = logging.getLogger("atri.bot")
 
@@ -25,13 +17,13 @@ logger = logging.getLogger("atri.bot")
 class Bot:
     """WebSocket 主循环：消息接收、处理、回复"""
 
-    def __init__(self, config, db, embedding, llm, tool_registry,
+    def __init__(self, config, db, embedding, llm, mcp_server,
                  persona_manager, vision_pipeline=None):
         self.config = config
         self.db = db
         self.embedding = embedding
         self.llm = llm
-        self.tools = tool_registry
+        self.mcp = mcp_server
         self.persona = persona_manager
         self.vision_pipeline = vision_pipeline
         self.rate_limiter = RateLimiter()
@@ -44,6 +36,7 @@ class Bot:
 
         self._echo_counter = 0
         self._last_random_reply = 0.0
+        self._pending_echos = {}  # echo_id -> asyncio.Future[str]
 
         self.parser = MessageParser(db, vision_pipeline, self.multimodal, self.bot_qq)
         self.assembler = ContextAssembler(
@@ -62,7 +55,15 @@ class Bot:
             async for raw in ws:
                 try:
                     data = json.loads(raw)
-                    await self._dispatch(data, ws)
+                    # Echo 响应路由
+                    echo = data.get("echo")
+                    if echo and echo in self._pending_echos:
+                        future = self._pending_echos.pop(echo)
+                        msg_id = str(data.get("data", {}).get("message_id", ""))
+                        future.set_result(msg_id)
+                    else:
+                        # 并发处理普通消息
+                        asyncio.create_task(self._dispatch(data, ws))
                 except Exception as e:
                     logger.error(f"消息处理异常: {e}", exc_info=True)
 
@@ -132,7 +133,7 @@ class Bot:
             persona_text = await self.db.get_persona(group_id, user_id)
             recent = await self.db.get_recent_messages(group_id, limit=20)
             messages = self.assembler.assemble(
-                persona_text, recent, content, None  # parsed.get("image_urls") [图像-暂时禁用]
+                persona_text, recent, content, parsed.get("image_urls")
             )
         except Exception as e:
             logger.error(f"Prompt 组装失败: {e}")
@@ -140,14 +141,17 @@ class Bot:
 
         # LLM 调用（带工具）
         try:
+            adapter_type = self.config["llm"].get("adapter", "openai")
+            tools = self.mcp.to_native_format() if adapter_type == "native" else self.mcp.to_openai_format()
+
             reply = await self.llm.chat_with_tools(
                 messages,
-                self.tools.get_tool_definitions(),
+                tools,
                 lambda name, args: self._execute_tool(name, args, group_id, user_id),
             )
             self.rate_limiter.record_api_success()
         except Exception as e:
-            logger.error(f"LLM 调用失败: {e}")
+            logger.error(f"LLM 调用失败: {type(e).__name__}: {e}", exc_info=True)
             self.rate_limiter.record_api_failure()
             await self._send_group(ws, group_id, "我脑袋有点宕机，稍微歇一下再问我吧")
             return
@@ -161,7 +165,7 @@ class Bot:
                 bot_embedding = await self.embedding.get_embedding(reply)
             await self.db.buffer_message(
                 sent_msg_id, group_id, self.bot_qq, "assistant", reply, bot_embedding,
-                user_name="[机器人]",
+                user_name="我",
             )
 
     def _should_reply(self, parsed: dict, content: str) -> bool:
@@ -187,48 +191,30 @@ class Bot:
 
     async def _execute_tool(self, name: str, args: dict,
                             group_id: str, user_id: str) -> str:
-        """工具分发器：根据名称路由到对应实现"""
-        if name == "query_chat_memory":
-            return await query_chat_memory(
-                self.db, self.embedding, group_id,
-                args.get("query_text"), args.get("target_user_id"),
-            )
+        """工具执行统一入口（通过 MCP Server）"""
+        # 限流检查
+        if name == "run_search" and not self.rate_limiter.check_search(user_id):
+            return "搜索太频繁了，稍后再试。"
+        if name == "run_sandbox" and not self.rate_limiter.check_sandbox(user_id):
+            return "沙盒调用太频繁，请稍后再试。"
 
-        elif name == "run_search":
-            query = args.get("query", "")
-            block = audit_search_query(query)
-            if block:
-                return block
-            if not self.rate_limiter.check_search(user_id):
-                return "搜索太频繁了，稍后再试。"
-            return await run_search(query)
+        # 注入上下文
+        args["group_id"] = group_id
+        args["user_id"] = user_id
 
-        elif name == "run_sandbox":
-            code = args.get("code", "")
-            block = audit_sandbox_code(code)
-            if block:
-                return block
-            if not self.rate_limiter.check_sandbox(user_id):
-                return "沙盒调用太频繁，请稍后再试。"
-            result = await run_sandbox(code)
-            self._pending_images = result.get("images", [])
-            return result["stdout"]
-
-        # [图像-暂时禁用] run_vision
-        # elif name == "run_vision":
-        #     url = args.get("image_url", "")
-        #     mode = args.get("mode", "describe")
-        #     block = audit_vision_url(url)
-        #     if block:
-        #         return block
-        #     if not self.vision_pipeline:
-        #         return "视觉模型未加载。"
-        #     return await run_vision(self.vision_pipeline, url, mode)
-
-        return f"未知工具: {name}"
+        try:
+            result = await self.mcp.execute(name, args)
+            # 处理沙盒图片
+            if name == "run_sandbox" and isinstance(result, dict):
+                self._pending_images = result.get("images", [])
+                return result["stdout"]
+            return result
+        except Exception as e:
+            logger.error(f"工具执行失败 {name}: {e}", exc_info=True)
+            return f"工具执行出错: {e}"
 
     async def _send_group(self, ws, group_id: str, text: str) -> str:
-        """发送群聊消息，直接读 WebSocket 等待 echo 响应获取 message_id"""
+        """发送群聊消息，通过 Future 等待 echo 响应获取 message_id"""
         message = text
         images = getattr(self, "_pending_images", [])
         if images:
@@ -238,6 +224,10 @@ class Bot:
 
         self._echo_counter += 1
         echo = f"send_{self._echo_counter}"
+
+        # 注册 Future 等待 echo 响应
+        future = asyncio.Future()
+        self._pending_echos[echo] = future
 
         payload = {
             "action": "send_group_msg",
@@ -250,17 +240,11 @@ class Bot:
         await ws.send(json.dumps(payload))
         logger.info(f"已发送回复到群 {group_id}")
 
-        # 直接读 WebSocket 等待 echo 响应，其他消息异步分发
-        deadline = asyncio.get_event_loop().time() + 5
+        # 等待 echo 响应（由主循环路由）
         try:
-            while asyncio.get_event_loop().time() < deadline:
-                remaining = deadline - asyncio.get_event_loop().time()
-                raw = await asyncio.wait_for(ws.recv(), timeout=max(remaining, 0.1))
-                data = json.loads(raw)
-                if data.get("echo") == echo:
-                    return str(data.get("data", {}).get("message_id", ""))
-                # 非 echo 响应的消息异步分发，不阻塞当前等待
-                asyncio.create_task(self._dispatch(data, ws))
+            msg_id = await asyncio.wait_for(future, timeout=5.0)
+            return msg_id
         except asyncio.TimeoutError:
             logger.warning(f"发送响应超时，echo={echo}")
-        return ""
+            self._pending_echos.pop(echo, None)
+            return ""

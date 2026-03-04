@@ -1,8 +1,5 @@
 import logging
-import asyncio
-import tempfile
-import os
-from functools import partial
+import base64
 
 import httpx
 
@@ -54,14 +51,15 @@ class MessageParser:
                 at_target = at_qq
                 is_at_bot = True
 
-            # [图像-暂时禁用] 图片仅保留占位，不做 OCR/BLIP
+            # 多模态：下载图片并转为 base64 data URI 发送给 LLM
             elif seg_type == "image":
                 parts.append("[图片]")
-                # img_result = await self._handle_image(data)
-                # if img_result["text"]:
-                #     parts.append(img_result["text"])
-                # if img_result.get("url"):
-                #     image_urls.append(img_result["url"])
+                if self.multimodal:
+                    url = data.get("url", "")
+                    if url:
+                        data_uri = await self._download_image_as_base64(url)
+                        if data_uri:
+                            image_urls.append(data_uri)
 
             elif seg_type == "text":
                 text = data.get("text", "").strip()
@@ -91,41 +89,16 @@ class MessageParser:
             return f'[回复 {who} 的消息："{original}"]', author
         return "[回复了一条未记录的消息]", None
 
-    # [图像-暂时禁用] 本地 OCR/BLIP 图片处理
-    # async def _handle_image(self, data: dict) -> dict:
-    #     """处理图片消息，根据多模态配置决定处理方式"""
-    #     url = data.get("url", "")
-    #     if not url:
-    #         return {"text": "", "url": None}
-    #     if self.multimodal:
-    #         return {"text": "[图片]", "url": url}
-    #     if not self.vision:
-    #         return {"text": "[图片]", "url": url}
-    #     try:
-    #         image_path = await self._download_image(url)
-    #         text_parts = []
-    #         loop = asyncio.get_event_loop()
-    #         ocr_text = await loop.run_in_executor(
-    #             None, partial(self.vision["ocr"].extract_text, image_path))
-    #         if ocr_text:
-    #             text_parts.append(f'[图片中的文字："{ocr_text}"]')
-    #         caption = await loop.run_in_executor(
-    #             None, partial(self.vision["captioner"].describe, image_path))
-    #         if caption:
-    #             text_parts.append(f'[图片场景："{caption}"]')
-    #         os.remove(image_path)
-    #         return {"text": " ".join(text_parts) if text_parts else "[图片]", "url": url}
-    #     except Exception as e:
-    #         logger.warning(f"图片处理失败: {e}")
-    #         return {"text": "[图片]", "url": url}
-    #
-    # async def _download_image(self, url: str) -> str:
-    #     """下载图片到临时目录，返回本地路径"""
-    #     async with httpx.AsyncClient(timeout=10) as client:
-    #         resp = await client.get(url)
-    #         resp.raise_for_status()
-    #     suffix = ".png" if "png" in url.lower() else ".jpg"
-    #     fd, path = tempfile.mkstemp(suffix=suffix)
-    #     with os.fdopen(fd, "wb") as f:
-    #         f.write(resp.content)
-    #     return path
+    async def _download_image_as_base64(self, url: str) -> str | None:
+        """下载图片并转为 base64 data URI，供多模态 LLM 使用"""
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                resp = await client.get(url)
+                resp.raise_for_status()
+            content_type = resp.headers.get("content-type", "image/jpeg")
+            mime = content_type.split(";")[0].strip()
+            b64 = base64.b64encode(resp.content).decode()
+            return f"data:{mime};base64,{b64}"
+        except Exception as e:
+            logger.warning(f"图片下载失败: {e}")
+            return None

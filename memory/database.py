@@ -204,7 +204,7 @@ class Database:
                 """UPDATE user_personas
                    SET is_updating = TRUE, lock_acquired_at = NOW()
                    WHERE group_id = $1 AND user_id = $2
-                     AND new_message_count >= 100
+                     AND new_message_count >= 50
                      AND (is_updating = FALSE OR lock_acquired_at < NOW() - INTERVAL '5 minutes')
                    RETURNING id""",
                 group_id, user_id,
@@ -233,14 +233,31 @@ class Database:
             )
 
     async def get_recent_user_messages(self, group_id: str, user_id: str, limit: int = 50):
-        """获取用户最近 N 条消息（用于人设总结）"""
-        async with self.pool.acquire() as conn:
-            return await conn.fetch(
-                """SELECT content, timestamp FROM chat_memory
-                   WHERE group_id = $1 AND user_id = $2
-                   ORDER BY timestamp DESC LIMIT $3""",
-                group_id, user_id, limit,
-            )
+        """获取用户最近 N 条消息（用于人设总结），合并缓冲区 + 数据库"""
+        # 从缓冲区取出该用户消息
+        buffered = []
+        async with self._buffer_lock:
+            for msg in self._buffer:
+                if msg[1] == group_id and msg[2] == user_id:
+                    buffered.append({
+                        "content": msg[5],
+                        "timestamp": datetime.now(),
+                    })
+
+        # 从数据库补齐
+        db_limit = max(limit - len(buffered), 0)
+        db_rows = []
+        if db_limit > 0:
+            async with self.pool.acquire() as conn:
+                db_rows = await conn.fetch(
+                    """SELECT content, timestamp FROM chat_memory
+                       WHERE group_id = $1 AND user_id = $2
+                       ORDER BY timestamp DESC LIMIT $3""",
+                    group_id, user_id, db_limit,
+                )
+
+        # 合并：缓冲区消息在前（更新），DB 消息在后
+        return buffered[::-1] + list(db_rows) if buffered else list(db_rows)
 
     async def close(self):
         # 关闭前刷盘残余缓冲
