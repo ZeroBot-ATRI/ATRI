@@ -12,13 +12,31 @@
 
 ## 架构
 
+### MCP 工具系统
+
+项目采用 MCP (Model Context Protocol) 架构，将工具定义与 LLM 格式解耦，支持多种模型后端：
+
+```
+agent/mcp_server.py (标准化工具定义)
+    ↓
+agent/mcp_tools.py (工具注册)
+    ↓
+agent/llm_adapter.py (模型适配器)
+    ↓
+agent/llm.py (统一接口)
+    ↓
+core/bot.py (自动执行)
+```
+
+### 模块依赖
+
 ```
 app.py → core/bot.py → core/message_parser.py
                       → core/context_assembler.py
                       → core/security.py
                       → core/rate_limiter.py
                       → agent/llm.py
-                      → agent/tools.py
+                      → agent/mcp_tools.py
                       → agent/{memory_search,web_search,sandbox}.py
        → memory/database.py (asyncpg, 热缓冲+冷持久化)
        → memory/embedding.py (Qwen3-Embedding)
@@ -60,7 +78,8 @@ pip install -r requirements.txt
     "llm": {
         "api_base": "https://api.deepseek.com/v1",
         "api_key": "你的API Key",
-        "model": "deepseek-chat"
+        "model": "deepseek-chat",
+        "adapter": "openai"  // 模型适配器: openai 或 native
     },
     "embedding": {
         "model_name": "Qwen/Qwen3-Embedding-0.6B",
@@ -90,6 +109,7 @@ python app.py
 | `admins` | 管理员 QQ 号列表，沙盒工具仅管理员可用 |
 | `wake_words` | 唤醒词列表，消息包含任一词即触发回复 |
 | `system_prompt` | 角色设定 Prompt，注入 system message |
+| `llm.adapter` | 模型适配器：`openai` (DeepSeek/GPT/Claude) 或 `native` (本地 Qwen/GLM) |
 
 ## 触发条件
 
@@ -107,3 +127,31 @@ python app.py
 | 联网搜索 | 每用户 3 次 | 60 秒 |
 | 代码沙盒 | 每用户 2 次 | 300 秒 |
 | 全局熔断 | 10 次 API 失败 | 60 秒冷却 |
+
+## 添加新工具
+
+编辑 `agent/mcp_tools.py`：
+
+```python
+# 定义处理函数
+async def my_tool_handler(param1: str, param2: int = 10, **ctx):
+    group_id = ctx.get("group_id")  # 自动注入的上下文
+    user_id = ctx.get("user_id")
+    # 你的逻辑
+    return "结果"
+
+# 注册到 MCP Server
+server.register(MCPTool(
+    name="my_tool",
+    description="工具描述",
+    parameters={
+        "type": "object",
+        "properties": {
+            "param1": {"type": "string", "description": "参数1"},
+            "param2": {"type": "integer", "description": "参数2"}
+        },
+        "required": ["param1"]
+    },
+    handler=my_tool_handler
+))
+```
