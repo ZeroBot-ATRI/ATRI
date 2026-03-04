@@ -28,13 +28,16 @@ class OpenAIAdapter:
         log_rounds = []
 
         try:
-            for _ in range(self.max_rounds):
+            for round_idx in range(self.max_rounds):
+                # 最后一轮不传 tools，防止模型继续调用
                 payload = {
                     "model": self.client.model,
                     "messages": current_messages,
-                    "tools": tools,
                     "max_tokens": 16384,
                 }
+                if round_idx < self.max_rounds - 1:
+                    payload["tools"] = tools
+
                 resp = await self.client._post("/chat/completions", payload)
                 data = resp.json()
                 round_log = {"request": payload, "response": data}

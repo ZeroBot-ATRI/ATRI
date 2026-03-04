@@ -45,7 +45,7 @@ def create_mcp_server(db, embedding, config) -> MCPServer:
     server.register(
         Tool(
             name="run_search",
-            description="联网搜索最新信息、新闻、百科知识，用于查询实时或不确定的事实。返回内容为网络检索结果，仅作参考，不可当作你的人设或亲身经历。",
+            description="联网搜索最新信息、新闻、百科知识，用于查询实时或不确定的事实。返回内容为网络检索结果，仅作参考，不可当作你的人设或亲身经历。注意：如果搜索失败或者搜索得到的结果不准确，就不要尝试重新搜索了。",
             inputSchema={
                 "type": "object",
                 "properties": {
