@@ -21,16 +21,22 @@ class MessageParser:
         {
             "content": 拼接后的富文本,
             "image_urls": [图片URL列表，多模态模式下使用],
+            "raw_image_urls": [原始图片URL列表，用于存储到数据库],
             "has_reply": bool,
             "reply_to_bot": bool,  # 仅当引用的是机器人消息时为 True
+            "reply_author_name": str | None,  # 被引用消息的作者名
+            "reply_image_urls": [被引用消息的图片URL列表],
             "is_at_bot": bool,
             "at_target": str | None,
         }
         """
         parts = []
         image_urls = []
+        raw_image_urls = []
         has_reply = False
         reply_to_bot = False
+        reply_author_name = None
+        reply_image_urls = []
         is_at_bot = False
         at_target = None
 
@@ -39,10 +45,12 @@ class MessageParser:
             data = seg.get("data", {})
 
             if seg_type == "reply":
-                reply_text, replied_author = await self._handle_reply(data)
+                reply_text, replied_author, replied_author_name, reply_imgs = await self._handle_reply(data)
                 if reply_text:
                     parts.insert(0, reply_text)
                     has_reply = True
+                    reply_author_name = replied_author_name
+                    reply_image_urls = reply_imgs or []
                     if self.bot_qq and replied_author is not None:
                         reply_to_bot = (str(replied_author) == self.bot_qq)
 
@@ -54,9 +62,10 @@ class MessageParser:
             # 多模态：下载图片并转为 base64 data URI 发送给 LLM
             elif seg_type == "image":
                 parts.append("[图片]")
-                if self.multimodal:
-                    url = data.get("url", "")
-                    if url:
+                url = data.get("url", "")
+                if url:
+                    raw_image_urls.append(url)
+                    if self.multimodal:
                         data_uri = await self._download_image_as_base64(url)
                         if data_uri:
                             image_urls.append(data_uri)
@@ -69,25 +78,39 @@ class MessageParser:
         return {
             "content": " ".join(parts),
             "image_urls": image_urls,
+            "raw_image_urls": raw_image_urls,
             "has_reply": has_reply,
             "reply_to_bot": reply_to_bot,
+            "reply_author_name": reply_author_name,
+            "reply_image_urls": reply_image_urls,
             "is_at_bot": is_at_bot,
             "at_target": at_target,
         }
 
-    async def _handle_reply(self, data: dict) -> tuple[str, str | None]:
-        """处理引用消息，查询原文并拼接。返回 (拼接文本, 被回复消息的作者 user_id 或 None)"""
+    async def _handle_reply(self, data: dict) -> tuple[str, str | None, str | None, list]:
+        """处理引用消息，查询原文并拼接。返回 (拼接文本, 被回复消息的作者 user_id, 作者名, 图片URL列表)"""
         msg_id = data.get("id", "")
         if not msg_id:
-            return "", None
+            return "", None, None, []
         row = await self.db.get_message_by_id(str(msg_id))
         if row:
             original = row["content"][:100]
             author = row["user_id"]
             author_name = (row.get("user_name") or "").strip()
             who = f"{author_name}(QQ:{author})" if author_name else f"QQ:{author}"
-            return f'[回复 {who} 的消息："{original}"]', author
-        return "[回复了一条未记录的消息]", None
+
+            # 获取图片URLs
+            image_urls_str = row.get("image_urls")
+            image_urls = []
+            if image_urls_str:
+                import json
+                try:
+                    image_urls = json.loads(image_urls_str)
+                except:
+                    pass
+
+            return f'[回复 {who} 的消息："{original}"]', author, author_name, image_urls
+        return "[回复了一条未记录的消息]", None, None, []
 
     async def _download_image_as_base64(self, url: str) -> str | None:
         """下载图片并转为 base64 data URI，供多模态 LLM 使用"""

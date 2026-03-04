@@ -18,10 +18,11 @@ class ContextAssembler:
         return int(len(text) / CHARS_PER_TOKEN)
 
     def assemble(self, persona: str, recent_messages: list,
-                 user_content: str, image_urls: list = None) -> list:
+                 user_content: str, image_urls: list = None, reply_context: dict = None) -> list:
         """
         组装完整 Prompt，返回 OpenAI messages 格式
         按优先级裁剪近期语境以控制 token
+        reply_context: {"author_name": str, "images": [base64_data_uris]} 当@bot且引用消息时传入
         """
         # 1. 系统设定（含 Prompt Injection 防御 + 检索/联网结果使用规范）
         system_text = (
@@ -66,11 +67,36 @@ class ContextAssembler:
 
         messages = [{"role": "system", "content": system_text}]
 
-        # 4. 用户输入（多模态时附加图片）
-        if self.multimodal and image_urls:
-            content_parts = [{"type": "text", "text": f"<user_input>{user_content}</user_input>"}]
-            for url in image_urls:
-                content_parts.append({"type": "image_url", "image_url": {"url": url}})
+        # 4. 用户输入（多模态时附加图片，引用消息时附加引用内容）
+        if self.multimodal and (image_urls or reply_context):
+            content_parts = []
+            image_count = 0
+            max_images = 3
+
+            # 如果有引用消息且包含图片，先添加引用消息的上下文
+            if reply_context and reply_context.get("images"):
+                author = reply_context.get("author_name") or "某用户"
+                content_parts.append({
+                    "type": "text",
+                    "text": f"<quoted_message>以下是用户引用的 {author} 的消息中的图片：</quoted_message>"
+                })
+                for img_url in reply_context["images"]:
+                    if image_count >= max_images:
+                        break
+                    content_parts.append({"type": "image_url", "image_url": {"url": img_url}})
+                    image_count += 1
+
+            # 添加用户当前输入
+            content_parts.append({"type": "text", "text": f"<user_input>{user_content}</user_input>"})
+
+            # 添加用户当前消息的图片
+            if image_urls:
+                for url in image_urls:
+                    if image_count >= max_images:
+                        break
+                    content_parts.append({"type": "image_url", "image_url": {"url": url}})
+                    image_count += 1
+
             messages.append({"role": "user", "content": content_parts})
         else:
             messages.append({

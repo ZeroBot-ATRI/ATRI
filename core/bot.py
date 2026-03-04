@@ -98,6 +98,13 @@ class Bot:
         if not content.strip():
             return
 
+        # 存储原始图片URLs（JSON格式）
+        raw_imgs = parsed.get("raw_image_urls", [])
+        image_urls_json = None
+        if raw_imgs:
+            import json
+            image_urls_json = json.dumps(raw_imgs)
+
         # 长度 < 5 的消息不做嵌入
         embedding_vec = None
         if len(content.strip()) >= 5:
@@ -110,7 +117,7 @@ class Bot:
         # 写入热存储缓冲区
         await self.db.buffer_message(
             message_id, group_id, user_id, "user", content, embedding_vec,
-            user_name=user_name,
+            user_name=user_name, image_urls=image_urls_json,
         )
 
         # 人设计数
@@ -132,8 +139,26 @@ class Bot:
         try:
             persona_text = await self.db.get_persona(group_id, user_id)
             recent = await self.db.get_recent_messages(group_id, limit=20)
+
+            # 当@bot且有引用时，传递引用消息的图片和作者信息
+            reply_context = None
+            if parsed["is_at_bot"] and parsed["has_reply"]:
+                reply_imgs = parsed.get("reply_image_urls", [])
+                if reply_imgs and self.multimodal:
+                    # 下载引用消息的图片为base64
+                    reply_image_data = []
+                    for url in reply_imgs:
+                        data_uri = await self.parser._download_image_as_base64(url)
+                        if data_uri:
+                            reply_image_data.append(data_uri)
+                    if reply_image_data:
+                        reply_context = {
+                            "author_name": parsed.get("reply_author_name"),
+                            "images": reply_image_data
+                        }
+
             messages = self.assembler.assemble(
-                persona_text, recent, content, parsed.get("image_urls")
+                persona_text, recent, content, parsed.get("image_urls"), reply_context
             )
         except Exception as e:
             logger.error(f"Prompt 组装失败: {e}")

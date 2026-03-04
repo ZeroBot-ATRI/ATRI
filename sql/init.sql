@@ -16,6 +16,7 @@ CREATE TABLE IF NOT EXISTS chat_memory (
 
 -- 兼容已有库：为旧表补充 user_name 列
 ALTER TABLE chat_memory ADD COLUMN IF NOT EXISTS user_name VARCHAR(64) DEFAULT '';
+ALTER TABLE chat_memory ADD COLUMN IF NOT EXISTS image_urls TEXT DEFAULT NULL;
 
 CREATE INDEX IF NOT EXISTS idx_chat_group_time ON chat_memory (group_id, timestamp DESC);
 CREATE INDEX IF NOT EXISTS idx_chat_group_user ON chat_memory (group_id, user_id, timestamp DESC);

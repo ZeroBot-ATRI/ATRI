@@ -52,10 +52,10 @@ class Database:
 
     # ---- 热存储缓冲区 ----
 
-    async def buffer_message(self, message_id, group_id, user_id, role, content, embedding, user_name: str = ""):
+    async def buffer_message(self, message_id, group_id, user_id, role, content, embedding, user_name: str = "", image_urls: str = None):
         """将消息写入内存缓冲区（热存储）。user_name 应由调用方先经 sanitize_user_name 处理。"""
         async with self._buffer_lock:
-            self._buffer.append((message_id, group_id, user_id, user_name, role, content, embedding))
+            self._buffer.append((message_id, group_id, user_id, user_name, role, content, embedding, image_urls))
         logger.debug(f"消息已缓冲，当前缓冲区大小: {len(self._buffer)}")
 
     async def _periodic_flush(self):
@@ -78,8 +78,8 @@ class Database:
         try:
             async with self.pool.acquire() as conn:
                 await conn.executemany(
-                    """INSERT INTO chat_memory (message_id, group_id, user_id, user_name, role, content, embedding)
-                       VALUES ($1, $2, $3, $4, $5, $6, $7)""",
+                    """INSERT INTO chat_memory (message_id, group_id, user_id, user_name, role, content, embedding, image_urls)
+                       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)""",
                     batch,
                 )
             logger.info(f"缓冲区刷盘完成，写入 {len(batch)} 条消息")
@@ -109,18 +109,18 @@ class Database:
             )
 
     async def get_message_by_id(self, message_id: str):
-        """根据 message_id 查询单条记录（用于引用溯源），优先查缓冲区。返回 content, user_id, user_name。"""
+        """根据 message_id 查询单条记录（用于引用溯源），优先查缓冲区。返回 content, user_id, user_name, image_urls。"""
         async with self._buffer_lock:
             for msg in self._buffer:
                 if msg[0] == message_id:
-                    return {"content": msg[5], "user_id": msg[2], "user_name": msg[3] or ""}
+                    return {"content": msg[5], "user_id": msg[2], "user_name": msg[3] or "", "image_urls": msg[7] if len(msg) > 7 else None}
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(
-                "SELECT content, user_id, user_name FROM chat_memory WHERE message_id = $1",
+                "SELECT content, user_id, user_name, image_urls FROM chat_memory WHERE message_id = $1",
                 message_id,
             )
             if row:
-                return {"content": row["content"], "user_id": row["user_id"], "user_name": row.get("user_name") or ""}
+                return {"content": row["content"], "user_id": row["user_id"], "user_name": row.get("user_name") or "", "image_urls": row.get("image_urls")}
             return None
 
     async def get_recent_messages(self, group_id: str, limit: int = 20):
