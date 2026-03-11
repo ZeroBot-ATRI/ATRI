@@ -36,6 +36,7 @@ class Bot:
 
         self._echo_counter = 0
         self._last_random_reply = 0.0
+        self._last_wake_word_reply = 0.0
         self._pending_echos = {}  # echo_id -> asyncio.Future[str]
 
         self.parser = MessageParser(db, vision_pipeline, self.multimodal, self.bot_qq)
@@ -207,7 +208,11 @@ class Bot:
             content_for_wake = content_for_wake.split('"]', 1)[-1].strip()
         for word in self.wake_words:
             if word and word.lower() in content_for_wake.lower():
-                return True
+                # 唤醒词触发需要间隔 120 秒
+                if time.time() - self._last_wake_word_reply >= 120:
+                    self._last_wake_word_reply = time.time()
+                    return True
+                return False
         # 1% 概率随机插嘴，两次间隔不低于 180 秒
         if random.random() < 0.01 and time.time() - self._last_random_reply >= 180:
             self._last_random_reply = time.time()

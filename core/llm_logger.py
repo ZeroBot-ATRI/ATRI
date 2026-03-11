@@ -5,13 +5,30 @@ LLM 交互日志模块
 
 import json
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 
 LOG_DIR = "logs/llm"
+MAX_LOG_DAYS = 7  # 保留最近7天的日志
 
 
 def _ensure_dir():
     os.makedirs(LOG_DIR, exist_ok=True)
+    _cleanup_old_logs()
+
+
+def _cleanup_old_logs():
+    """删除超过 MAX_LOG_DAYS 天的日志文件"""
+    try:
+        cutoff = datetime.now() - timedelta(days=MAX_LOG_DAYS)
+        for fname in os.listdir(LOG_DIR):
+            if not fname.endswith(".json"):
+                continue
+            fpath = os.path.join(LOG_DIR, fname)
+            mtime = datetime.fromtimestamp(os.path.getmtime(fpath))
+            if mtime < cutoff:
+                os.remove(fpath)
+    except Exception:
+        pass  # 清理失败不影响主流程
 
 
 def _make_path(tag: str) -> str:

@@ -8,7 +8,7 @@ from agent.llm_adapter import OpenAIAdapter, NativeAdapter, QwenAdapter
 
 logger = logging.getLogger("atri.agent.llm")
 
-TIMEOUT = 60  # API 超时秒数（思考模型需要更长时间）
+TIMEOUT = 180  # API 超时秒数（122B 量化模型需要更长时间）
 
 
 class LLMClient:
@@ -74,11 +74,44 @@ class LLMClient:
                 temperature=1.0,
                 stream=True
             )
-            # 收集流式响应
+            # 收集流式响应（过滤思考内容，以 </think> 为分隔符）
             content = ""
+            buffer = ""
+            is_thinking = True
+
             for chunk in response:
-                if chunk.choices and chunk.choices[0].delta.content:
-                    content += chunk.choices[0].delta.content
+                if not chunk.choices:
+                    continue
+                delta = chunk.choices[0].delta
+
+                # 提取 content
+                chunk_content = delta.content or ""
+                if not chunk_content:
+                    continue
+
+                if is_thinking:
+                    buffer += chunk_content
+                    # 检查是否出现 </think> 标签（分水岭）
+                    if "</think>" in buffer:
+                        parts = buffer.split("</think>", 1)
+                        # 记录思考内容（</think> 之前的所有内容）
+                        thinking_content = parts[0].strip()
+                        if thinking_content:
+                            logger.debug(f"[Thinking] {thinking_content[:200]}...")
+                        # 切换到正式回答模式
+                        is_thinking = False
+                        # 保留 </think> 标签后的内容
+                        if len(parts) > 1:
+                            content += parts[1].lstrip()
+                        buffer = ""
+                else:
+                    # 已经跨越分水岭，直接收集正式回答
+                    content += chunk_content
+
+            # 如果没有 </think> 标签，说明模型没有使用思考格式，返回全部内容
+            if is_thinking and buffer:
+                content = buffer.strip()
+
             return content.strip()
 
         try:
